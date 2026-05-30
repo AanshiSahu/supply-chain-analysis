@@ -1,12 +1,11 @@
-# supply-chain-analysis
 Engineered an end-to-end Python pipeline using pandas to clean raw logistics data and predict supply chain delays for interactive visual analytics.
-# Supply Chain Analysis 📦🚚
+# Supply Chain Analysis 
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 [![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg?style=flat)](https://github.com/AanshiSahu/supply-chain-analysis/issues)
 
-A comprehensive data analytics project focused on analyzing and optimizing supply chain operations. This repository uses historical data to uncover insights regarding inventory management, logistics efficiency, supplier performance, shipping costs, and order fulfillment cycles.
+A comprehensive data analytics project focused on analyzing and optimizing supply chain operations. This repository uses historical data to uncover insights regarding inventory management, logistics efficiency, supplier performance, shipping costs, and order fulfillment cycles. Engineered an end-to-end Python pipeline using pandas to clean raw logistics data and predict supply chain delays for interactive visual analytics.
 
 ---
 
