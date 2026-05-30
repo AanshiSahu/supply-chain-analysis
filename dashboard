@@ -1,0 +1,659 @@
+"""
+Supply Chain Dashboard Generator
+==================================
+
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
+from imblearn.over_sampling import SMOTE
+import warnings, webbrowser, os
+warnings.filterwarnings("ignore")
+
+print("⏳ Loading and processing data...")
+
+# ── 1. LOAD & CLEAN ───────────────────────────────────────────────────────────
+df = pd.read_csv('DataCoSupplyChainDataset.csv', encoding='latin-1')
+
+drop_cols = [
+    'Product Description','Product Image','Customer Email','Customer Password',
+    'Customer Fname','Customer Lname','Customer Zipcode','Customer Street',
+    'Order Zipcode','Longitude','Latitude','Order Item Cardprod Id','Order Item Id',
+    'Order Item Discount','Order Item Discount Rate','Order Item Discount Price',
+    'Order Item Quantity','Order Item Total','Category Id','Department Id',
+    'Order Id','Order Customer Id','Customer Id','Product Card Id','Product Category Id',
+    'Benefit Per Order','Product Status','Customer City','Order City','Order Country',
+    'Order State','Customer State','Market'
+]
+df = df.drop(columns=drop_cols, errors='ignore')
+df = df[df['Delivery Status'] != 'Shipping canceled'].copy()
+
+for c in ['order date (DateOrders)', 'shipping date (DateOrders)']:
+    df[c] = pd.to_datetime(df[c], errors='coerce')
+
+df['Order Processing Time'] = (df['shipping date (DateOrders)'] - df['order date (DateOrders)']).dt.days
+df['Delay']       = df['Order Processing Time'] - df['Days for shipment (scheduled)']
+df['Is_Delayed']  = df['Delay'] > 0
+df['order_month'] = df['order date (DateOrders)'].dt.month
+df['order_day']   = df['order date (DateOrders)'].dt.day_name()
+df['order_hour']  = df['order date (DateOrders)'].dt.hour
+df['Profitability Flag'] = np.where(
+    df['Order Profit Per Order'] > 0, 'Profit',
+    np.where(df['Order Profit Per Order'] < 0, 'Loss', 'Break-even')
+)
+
+# ── 2. TRAIN MODEL ────────────────────────────────────────────────────────────
+print("🤖 Training model...")
+
+feature_cols = ['Type','Days for shipment (scheduled)','Category Name',
+                'Customer Segment','Department Name','Order Region',
+                'Shipping Mode','order_month','order_hour']
+avail = [c for c in feature_cols if c in df.columns]
+has_model = 'Late_delivery_risk' in df.columns
+
+model_figs = []
+fi_df      = pd.DataFrame()
+acc = prec = rec = f1v = 0.0
+
+if has_model:
+    X = df[avail].copy()
+    y = df['Late_delivery_risk']
+    cat_cols = X.select_dtypes(include=['object','category']).columns.tolist()
+    for col in cat_cols:
+        freq = X[col].value_counts(normalize=True)
+        X[f'{col}_freq'] = X[col].map(freq)
+    X_enc = X.drop(columns=cat_cols)
+    X_train, X_test, y_train, y_test = train_test_split(X_enc, y, test_size=0.2, random_state=42, stratify=y)
+    X_bal, y_bal = SMOTE(random_state=42).fit_resample(X_train, y_train)
+    rf = RandomForestClassifier(n_estimators=120, random_state=42, n_jobs=-1)
+    rf.fit(X_bal, y_bal)
+    y_pred = rf.predict(X_test)
+    acc  = accuracy_score(y_test, y_pred)
+    prec = precision_score(y_test, y_pred, zero_division=0)
+    rec  = recall_score(y_test, y_pred, zero_division=0)
+    f1v  = f1_score(y_test, y_pred, zero_division=0)
+    fi_df = pd.DataFrame({'Feature': X_enc.columns, 'Importance': rf.feature_importances_}).sort_values('Importance')
+    fi_df['Feature'] = fi_df['Feature'].str.replace('_freq',' (freq)', regex=False)
+    cm = confusion_matrix(y_test, y_pred)
+    labels_cm = [str(l) for l in sorted(y_test.unique())]
+
+print("📊 Building charts...")
+
+# ── 3. METRICS ────────────────────────────────────────────────────────────────
+delayed_df   = df[df['Is_Delayed']]
+total        = len(df)
+late_n       = int(df['Is_Delayed'].sum())
+late_pct     = late_n / total * 100
+ontime_pct   = 100 - late_pct
+p90          = delayed_df['Delay'].quantile(0.90)
+tot_profit   = df.loc[df['Order Profit Per Order'] > 0, 'Order Profit Per Order'].sum()
+late_pnl     = df.loc[df['Is_Delayed'], 'Order Profit Per Order'].sum()
+avg_delay    = delayed_df['Delay'].mean()
+profit_pct   = (df['Profitability Flag'] == 'Profit').mean() * 100
+
+def fmt(v):
+    if abs(v) >= 1e6: return f"${v/1e6:.1f}M"
+    if abs(v) >= 1e3: return f"${v/1e3:.1f}K"
+    return f"${v:.0f}"
+
+month_map = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',
+             7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'}
+day_order = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+
+# ── COLORS ────────────────────────────────────────────────────────────────────
+C = dict(
+    bg       = "#0F1117",
+    surface  = "#1A1D27",
+    surface2 = "#21252F",
+    border   = "#2D3142",
+    accent   = "#4FC3F7",
+    success  = "#66BB6A",
+    warning  = "#FFA726",
+    danger   = "#EF5350",
+    text     = "#E8EAF0",
+    dim      = "#8891A5",
+)
+
+PT = dict(
+    template      = "plotly_dark",
+    paper_bgcolor = C['surface'],
+    plot_bgcolor  = C['surface'],
+    font_color    = C['text'],
+    font_family   = "monospace",
+    margin        = dict(l=30, r=30, t=50, b=30),
+)
+
+def styled(fig, h=380):
+    fig.update_layout(**PT, height=h)
+    fig.update_xaxes(gridcolor=C['border'], zerolinecolor=C['border'])
+    fig.update_yaxes(gridcolor=C['border'], zerolinecolor=C['border'])
+    return fig
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CHART BUILDERS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Profitability donut
+prof_counts = df['Profitability Flag'].value_counts()
+fig_pie = go.Figure(go.Pie(
+    labels=prof_counts.index, values=prof_counts.values, hole=0.6,
+    marker=dict(colors=[C['success'], C['danger'], C['warning']],
+                line=dict(color=C['bg'], width=3)),
+    textinfo='percent+label',
+))
+fig_pie.add_annotation(text=f"<b>{profit_pct:.0f}%</b><br>Profitable",
+                        x=0.5, y=0.5, showarrow=False, font_size=15, font_color=C['text'])
+fig_pie.update_layout(title="Profitability Breakdown", showlegend=True, **PT, height=380)
+
+# Profit vs Delay dual-axis
+pm = (df.groupby('Delay')['Order Profit Per Order']
+      .agg(total_profit='sum', mean_profit='mean').reset_index()
+      .query('-15 <= Delay <= 20'))
+fig_pdelay = make_subplots(specs=[[{"secondary_y": True}]])
+fig_pdelay.add_trace(go.Bar(x=pm['Delay'], y=pm['total_profit'], name='Total Profit',
+    marker_color=C['accent'], opacity=0.65), secondary_y=False)
+fig_pdelay.add_trace(go.Scatter(x=pm['Delay'], y=pm['mean_profit'], name='Mean Profit',
+    mode='lines+markers', line=dict(color=C['warning'], width=2.5)), secondary_y=True)
+fig_pdelay.add_vline(x=0, line_dash="dash", line_color=C['danger'], opacity=0.7)
+fig_pdelay.update_yaxes(title_text="Total Profit", secondary_y=False, gridcolor=C['border'])
+fig_pdelay.update_yaxes(title_text="Mean Profit",  secondary_y=True,  gridcolor='rgba(0,0,0,0)')
+fig_pdelay.update_xaxes(title_text="Delay (days)", gridcolor=C['border'])
+fig_pdelay.update_layout(title="Profit vs. Delay Days", **PT, height=380)
+
+# Delivery status bar
+if 'Delivery Status' in df.columns:
+    ds = df['Delivery Status'].value_counts().reset_index()
+    ds.columns = ['Status','Count']
+    fig_ds = px.bar(ds, x='Count', y='Status', orientation='h',
+                    color='Count', color_continuous_scale='viridis', text='Count',
+                    title="Delivery Status Distribution")
+    fig_ds.update_traces(texttemplate='%{text:,}', textposition='outside')
+    fig_ds.update_layout(coloraxis_showscale=False,
+                         yaxis={'categoryorder':'total ascending'}, **PT, height=340)
+
+# Delay distribution
+dd = (df['Delay'].value_counts(normalize=True).sort_index()*100).reset_index()
+dd.columns = ['Delay_Days','Pct']
+dd = dd[(dd['Delay_Days'] >= -10) & (dd['Delay_Days'] <= 20)]
+fig_dd = px.bar(dd, x='Delay_Days', y='Pct', color='Delay_Days',
+                color_continuous_scale='RdYlGn_r', color_continuous_midpoint=0,
+                title="Delay Distribution (Days Over Schedule)",
+                labels={'Delay_Days':'Delay (days)','Pct':'% of Orders'})
+fig_dd.add_vline(x=0, line_dash="dash", line_color=C['warning'],
+                  annotation_text="On-time boundary", annotation_font_color=C['warning'])
+fig_dd.update_layout(coloraxis_showscale=False, **PT, height=360)
+
+# Bottleneck charts
+def delay_pct_fig(cat, title):
+    cdf = (df.groupby(cat)
+           .agg(total=('Delay','count'), late=('Is_Delayed','sum'))
+           .assign(delay_pct=lambda x: x['late']/x['total']*100)
+           .reset_index()
+           .sort_values('delay_pct', ascending=True)
+           .tail(10))
+    fig = px.bar(cdf, x='delay_pct', y=cat, orientation='h',
+                 color='delay_pct', color_continuous_scale='viridis',
+                 text=cdf['delay_pct'].round(1).astype(str)+'%', title=title,
+                 labels={'delay_pct':'Late %', cat:''})
+    fig.update_traces(textposition='inside', insidetextanchor='middle')
+    fig.update_layout(coloraxis_showscale=False, **PT, height=320)
+    return fig
+
+bottleneck_figs = []
+for cat, title in [
+    ('Shipping Mode',    'Delay % by Shipping Mode'),
+    ('Customer Segment','Delay % by Customer Segment'),
+    ('Order Region',    'Delay % by Region (Top 10)'),
+    ('Department Name', 'Delay % by Department'),
+    ('Type',            'Delay % by Order Type'),
+    ('Order Status',    'Delay % by Order Status'),
+]:
+    if cat in df.columns:
+        bottleneck_figs.append(delay_pct_fig(cat, title))
+
+# Shipping × Segment heatmap
+if 'Shipping Mode' in df.columns and 'Customer Segment' in df.columns:
+    hm_data = (df.groupby(['Shipping Mode','Customer Segment'])['Is_Delayed']
+               .mean().mul(100).round(1).reset_index()
+               .pivot(index='Shipping Mode', columns='Customer Segment', values='Is_Delayed'))
+    fig_hm = px.imshow(hm_data, color_continuous_scale='RdYlGn_r', text_auto='.1f',
+                        title="Late Delivery % — Shipping Mode × Customer Segment",
+                        labels=dict(color='Late %'))
+    fig_hm.update_layout(**PT, height=320)
+
+# Monthly trend
+dm = (df.groupby('order_month')['Is_Delayed'].mean()*100).reset_index()
+dm.columns = ['Month_Num','Delay_Pct']
+dm['Month'] = dm['Month_Num'].map(month_map)
+avg_line = dm['Delay_Pct'].mean()
+fig_month = go.Figure()
+fig_month.add_trace(go.Scatter(
+    x=dm['Month'], y=dm['Delay_Pct'], mode='lines+markers+text',
+    text=dm['Delay_Pct'].round(1).astype(str)+'%', textposition='top center',
+    line=dict(color=C['accent'], width=2.5),
+    marker=dict(size=9, color=dm['Delay_Pct'], colorscale='RdYlGn_r',
+                line=dict(width=2, color=C['bg'])),
+    fill='tozeroy', fillcolor='rgba(79,195,247,0.08)',
+))
+fig_month.add_hline(y=avg_line, line_dash='dot', line_color=C['warning'],
+                     annotation_text=f"Avg {avg_line:.1f}%", annotation_font_color=C['warning'])
+fig_month.update_layout(title="Monthly Delay Rate Trend",
+                         xaxis_title="Month", yaxis_title="Late %", **PT, height=360)
+
+# Day of week
+dd_day = (df.groupby('order_day')['Is_Delayed'].mean()*100).reset_index()
+dd_day.columns = ['Day','Delay_Pct']
+dd_day['Day'] = pd.Categorical(dd_day['Day'], categories=day_order, ordered=True)
+dd_day = dd_day.sort_values('Day')
+fig_day = px.bar(dd_day, x='Day', y='Delay_Pct', color='Delay_Pct',
+                  color_continuous_scale='RdYlGn_r', text=dd_day['Delay_Pct'].round(1).astype(str)+'%',
+                  title="Delay Rate by Day of Week", labels={'Day':'','Delay_Pct':'Late %'})
+fig_day.update_traces(textposition='outside')
+fig_day.update_layout(coloraxis_showscale=False, **PT, height=360)
+
+# Hour of day
+dh = (df.groupby('order_hour')['Is_Delayed'].mean()*100).reset_index()
+dh.columns = ['Hour','Delay_Pct']
+fig_hour = px.line(dh, x='Hour', y='Delay_Pct', markers=True,
+                    color_discrete_sequence=[C['accent']],
+                    title="Delay Rate by Order Hour",
+                    labels={'Hour':'Hour of Day (24h)','Delay_Pct':'Late %'})
+fig_hour.add_hrect(
+    y0=dh['Delay_Pct'].quantile(0.75), y1=dh['Delay_Pct'].max(),
+    fillcolor="rgba(239,83,80,0.08)",
+    annotation_text="High-risk window", annotation_font_color=C['danger']
+)
+fig_hour.update_layout(**PT, height=360)
+
+# Month × Day heatmap
+hm2 = (df.groupby(['order_month','order_day'])['Is_Delayed']
+       .mean().mul(100).reset_index()
+       .pivot(index='order_day', columns='order_month', values='Is_Delayed'))
+hm2 = hm2.reindex([d for d in day_order if d in hm2.index])
+hm2.columns = [month_map.get(c,c) for c in hm2.columns]
+fig_hm2 = px.imshow(hm2, color_continuous_scale='RdYlGn_r', text_auto='.0f',
+                     title="Delay Heatmap — Month × Day of Week", labels=dict(color='Late %'))
+fig_hm2.update_layout(**PT, height=340)
+
+# Volume vs Delay
+vm = df.groupby('order_month').agg(Volume=('Is_Delayed','count'),
+     Delay_Pct=('Is_Delayed', lambda x: x.mean()*100)).reset_index()
+vm['Month'] = vm['order_month'].map(month_map)
+fig_vol = make_subplots(specs=[[{"secondary_y": True}]])
+fig_vol.add_trace(go.Bar(x=vm['Month'], y=vm['Volume'], name='Order Volume',
+    marker_color=C['accent'], opacity=0.5), secondary_y=False)
+fig_vol.add_trace(go.Scatter(x=vm['Month'], y=vm['Delay_Pct'], name='Late %',
+    mode='lines+markers', line=dict(color=C['danger'], width=2.5)), secondary_y=True)
+fig_vol.update_yaxes(title_text="Volume",  secondary_y=False, gridcolor=C['border'])
+fig_vol.update_yaxes(title_text="Late %",  secondary_y=True,  gridcolor='rgba(0,0,0,0)')
+fig_vol.update_layout(title="Order Volume vs. Late Delivery Rate", **PT, height=360)
+
+# Feature Importance
+if has_model and not fi_df.empty:
+    fig_fi = px.bar(fi_df, x='Importance', y='Feature', orientation='h',
+                    color='Importance', color_continuous_scale='viridis',
+                    text=fi_df['Importance'].round(3).astype(str),
+                    title="Feature Importance — What Drives Late Deliveries?")
+    fig_fi.update_traces(textposition='outside')
+    fig_fi.update_layout(coloraxis_showscale=False,
+                          yaxis={'categoryorder':'total ascending'}, **PT, height=400)
+
+    fig_cm_plot = px.imshow(cm,
+        x=[f"Pred: {l}" for l in labels_cm],
+        y=[f"True: {l}" for l in labels_cm],
+        color_continuous_scale='Blues', text_auto=True,
+        title="Confusion Matrix", labels=dict(color='Count'))
+    fig_cm_plot.update_layout(**PT, height=400)
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 4. BUILD HTML
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+print("🎨 Assembling HTML dashboard...")
+
+def to_html(fig):
+    return fig.to_html(full_html=False, include_plotlyjs=False, config={'displayModeBar': True})
+
+def kpi(label, value, sub="", color="#4FC3F7"):
+    return f"""
+    <div class="kpi-card" style="border-top:3px solid {color}">
+        <div class="kpi-label">{label}</div>
+        <div class="kpi-value" style="color:{color}">{value}</div>
+        {"<div class='kpi-sub'>"+sub+"</div>" if sub else ""}
+    </div>"""
+
+def section(title, insight=""):
+    ins = f'<div class="insight">{insight}</div>' if insight else ""
+    return f'<div class="section-title">{title}</div>{ins}'
+
+def row(*charts, cols=2):
+    width = 100 // cols
+    inner = "".join(f'<div style="width:{width}%;min-width:320px">{c}</div>' for c in charts)
+    return f'<div class="row">{inner}</div>'
+
+bn_rows = ""
+for i in range(0, len(bottleneck_figs), 2):
+    pair = bottleneck_figs[i:i+2]
+    if len(pair) == 2:
+        bn_rows += row(to_html(pair[0]), to_html(pair[1]))
+    else:
+        bn_rows += f'<div style="width:100%">{to_html(pair[0])}</div>'
+
+model_section = ""
+if has_model and not fi_df.empty:
+    model_section = f"""
+    <div class="tab-content" id="tab-model">
+      <div class="tab-header">
+        <h2>🤖 Model Insights</h2>
+        <p>Random Forest · SMOTE-balanced · Predicting <code>Late_delivery_risk</code></p>
+      </div>
+      <div class="kpi-row">
+        {kpi("Accuracy",  f"{acc:.1%}",  "Overall correct",       "#4FC3F7")}
+        {kpi("Precision", f"{prec:.1%}", "Predicted late = true", "#66BB6A")}
+        {kpi("Recall",    f"{rec:.1%}",  "Late orders caught",    "#FFA726")}
+        {kpi("F1 Score",  f"{f1v:.1%}",  "Balance P & R",         "#4FC3F7")}
+      </div>
+      {section("Feature Importance",
+               "Features ranked by how much they influence the prediction."
+               " <b>Shipping Mode and scheduled days</b> dominate — the biggest levers for ops.")}
+      {row(to_html(fig_fi), to_html(fig_cm_plot))}
+    </div>"""
+
+hm_html     = to_html(fig_hm)   if 'fig_hm'  in dir() else ""
+ds_html     = to_html(fig_ds)   if 'fig_ds'  in dir() else ""
+
+HTML = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Supply Chain Intelligence Dashboard</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after {{ box-sizing: border-box; margin:0; padding:0; }}
+
+  :root {{
+    --bg:      #0F1117;
+    --surface: #1A1D27;
+    --surf2:   #21252F;
+    --border:  #2D3142;
+    --accent:  #4FC3F7;
+    --success: #66BB6A;
+    --warning: #FFA726;
+    --danger:  #EF5350;
+    --text:    #E8EAF0;
+    --dim:     #8891A5;
+  }}
+
+  body {{
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    min-height: 100vh;
+  }}
+
+  /* ── NAV ── */
+  .nav {{
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top:0; z-index:100;
+    display: flex; align-items: center; gap: 0;
+    padding: 0 32px;
+  }}
+  .nav-logo {{
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 1.1rem;
+    background: linear-gradient(135deg, var(--accent), #26C6DA);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    padding: 16px 24px 16px 0;
+    margin-right: 16px;
+    border-right: 1px solid var(--border);
+    white-space: nowrap;
+  }}
+  .tab-btn {{
+    background: none; border: none; cursor: pointer;
+    color: var(--dim);
+    font-family: 'Syne', sans-serif;
+    font-weight: 600; font-size: 0.82rem;
+    letter-spacing: 0.06em;
+    padding: 20px 20px;
+    border-bottom: 3px solid transparent;
+    transition: color .2s, border-color .2s;
+    white-space: nowrap;
+  }}
+  .tab-btn:hover  {{ color: var(--text); }}
+  .tab-btn.active {{ color: var(--accent); border-bottom-color: var(--accent); }}
+
+  /* ── LAYOUT ── */
+  .wrapper {{ max-width: 1400px; margin: 0 auto; padding: 32px 24px; }}
+
+  .tab-content {{ display: none; }}
+  .tab-content.active {{ display: block; }}
+
+  .tab-header {{
+    margin-bottom: 28px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }}
+  .tab-header h2 {{
+    font-family: 'Syne', sans-serif;
+    font-size: 1.9rem; font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), #26C6DA);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 6px;
+  }}
+  .tab-header p {{ color: var(--dim); font-size: 0.8rem; letter-spacing: 0.06em; }}
+  .tab-header code {{ color: var(--accent); }}
+
+  /* ── KPI CARDS ── */
+  .kpi-row {{
+    display: flex; flex-wrap: wrap; gap: 16px;
+    margin-bottom: 32px;
+  }}
+  .kpi-card {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    flex: 1; min-width: 160px;
+  }}
+  .kpi-label {{
+    font-size: 0.68rem; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--dim);
+    margin-bottom: 10px;
+  }}
+  .kpi-value {{
+    font-family: 'Syne', sans-serif;
+    font-size: 2rem; font-weight: 800; line-height: 1.1;
+  }}
+  .kpi-sub {{
+    font-size: 0.72rem; color: var(--dim); margin-top: 6px;
+  }}
+
+  /* ── SECTION ── */
+  .section-title {{
+    font-family: 'Syne', sans-serif;
+    font-size: 1rem; font-weight: 700;
+    color: var(--text);
+    margin: 32px 0 6px 0;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }}
+  .insight {{
+    background: var(--surf2);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    padding: 10px 16px;
+    font-size: 0.78rem;
+    color: var(--dim);
+    margin-bottom: 16px;
+    line-height: 1.7;
+  }}
+  .insight b {{ color: var(--text); }}
+
+  /* ── ROW ── */
+  .row {{
+    display: flex; flex-wrap: wrap; gap: 16px;
+    margin-bottom: 16px;
+    align-items: flex-start;
+  }}
+  .row > div {{ flex:1; min-width: 320px; }}
+
+  /* ── CHART WRAPPER ── */
+  .js-plotly-plot {{ border-radius: 10px; overflow: hidden; }}
+
+  /* ── FOOTER ── */
+  footer {{
+    text-align: center;
+    padding: 32px;
+    font-size: 0.72rem;
+    color: var(--dim);
+    letter-spacing: 0.06em;
+    border-top: 1px solid var(--border);
+    margin-top: 48px;
+  }}
+
+  /* ── SCROLLBAR ── */
+  ::-webkit-scrollbar {{ width: 6px; height: 6px; }}
+  ::-webkit-scrollbar-track {{ background: var(--bg); }}
+  ::-webkit-scrollbar-thumb {{ background: var(--border); border-radius: 3px; }}
+</style>
+</head>
+
+<body>
+
+<!-- ── NAVBAR ── -->
+<nav class="nav">
+  <div class="nav-logo">🚚 Supply Chain IQ</div>
+  <button class="tab-btn active" onclick="showTab('exec',  this)">📊 Executive</button>
+  <button class="tab-btn"        onclick="showTab('eda',   this)">🔍 EDA & Bottlenecks</button>
+  <button class="tab-btn"        onclick="showTab('time',  this)">🕐 Time Intelligence</button>
+  {"<button class='tab-btn' onclick=\"showTab('model',this)\">🤖 Model Insights</button>" if has_model else ""}
+</nav>
+
+<!-- ── CONTENT ── -->
+<div class="wrapper">
+
+  <!-- ── TAB 1: EXECUTIVE ── -->
+  <div class="tab-content active" id="tab-exec">
+    <div class="tab-header">
+      <h2>📊 Executive Summary</h2>
+      <p>Operational health at a glance · DataCo Supply Chain Dataset</p>
+    </div>
+
+    <div class="kpi-row">
+      {kpi("Total Orders",        f"{total:,}",        "All non-cancelled orders",                      "#4FC3F7")}
+      {kpi("Late Delivery Rate",  f"{late_pct:.1f}%",  f"{late_n:,} orders delayed",                   "#EF5350")}
+      {kpi("On-Time Rate",        f"{ontime_pct:.1f}%",f"{total-late_n:,} on-time deliveries",          "#66BB6A")}
+      {kpi("90th-Pct Delay",      f"{p90:.0f} days",   "Worst 10% of late orders",                     "#FFA726")}
+      {kpi("Gross Profit",        fmt(tot_profit),      "Sum of all profitable orders",                  "#66BB6A")}
+      {kpi("P&L on Late Orders",  fmt(late_pnl),        "Profit eroded by delays",                      "#EF5350")}
+      {kpi("Avg Delay",           f"{avg_delay:.1f}d",  "Mean days over schedule (late orders only)",   "#FFA726")}
+      {kpi("Profitable Orders",   f"{profit_pct:.1f}%", "Orders with positive margin",                  "#4FC3F7")}
+    </div>
+
+    {section("Profitability & Delay Impact",
+             "The donut shows margin health. The bar chart reveals how profit collapses as delays grow — "
+             "<b>on-time orders dominate revenue</b>; even 1 day of delay shows measurable margin erosion.")}
+    {row(to_html(fig_pie), to_html(fig_pdelay))}
+
+    {section("Delivery Status Overview",
+             "A macro-level count of all delivery outcomes. "
+             "<b>Advance shipping</b> sets the benchmark — understanding what makes those orders early "
+             "is the fastest path to improving the late-delivery rate.")}
+    {ds_html}
+  </div>
+
+  <!-- ── TAB 2: EDA ── -->
+  <div class="tab-content" id="tab-eda">
+    <div class="tab-header">
+      <h2>🔍 EDA & Bottleneck Analysis</h2>
+      <p>Where do delays originate? Drill into every operational dimension.</p>
+    </div>
+
+    {section("Delay Distribution",
+             "Most orders land in the <b>0–5 day late band</b>. The right tail of severely delayed orders "
+             "is small in count but outsized in customer impact and margin damage.")}
+    {to_html(fig_dd)}
+
+    {section("Delay % Across Operational Dimensions",
+             "Each chart shows what share of orders in a category arrive late. "
+             "<b>High bars are structural bottlenecks</b> — prioritise these for process review first.")}
+    {bn_rows}
+
+    {section("Compound Risk — Shipping Mode × Customer Segment",
+             "Dark cells are the highest-risk combinations. This matrix tells ops managers "
+             "<b>exactly which pairing</b> to fix first — not just that a segment or mode is underperforming.")}
+    {hm_html}
+  </div>
+
+  <!-- ── TAB 3: TIME ── -->
+  <div class="tab-content" id="tab-time">
+    <div class="tab-header">
+      <h2>🕐 Time Intelligence</h2>
+      <p>When do delays peak? Seasonal, weekly, and intraday patterns.</p>
+    </div>
+
+    {section("Monthly Delay Rate Trend",
+             "Seasonal peaks signal capacity constraints. <b>High-delay months</b> are the prime candidates "
+             "for pre-emptive carrier agreements and inventory pre-positioning.")}
+    {to_html(fig_month)}
+
+    {row(to_html(fig_day), to_html(fig_hour))}
+
+    {section("Month × Day of Week Heatmap",
+             "Persistent dark cells across all months = structural weekday issues. "
+             "Isolated hot cells = seasonal peaks on specific days. Both need different interventions.")}
+    {to_html(fig_hm2)}
+
+    {section("Order Volume vs. Late Rate",
+             "When volume AND delay spike together, the supply chain is hitting its throughput ceiling — "
+             "a critical signal for <b>capacity planning</b>.")}
+    {to_html(fig_vol)}
+  </div>
+
+  <!-- ── TAB 4: MODEL ── -->
+  {model_section}
+
+</div>
+
+<footer>
+  Supply Chain IQ &nbsp;·&nbsp; DataCo Supply Chain Dataset &nbsp;·&nbsp;
+  Random Forest + SMOTE &nbsp;·&nbsp; Built with Python & Plotly
+</footer>
+
+<script>
+  function showTab(id, btn) {{
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('tab-' + id).classList.add('active');
+    btn.classList.add('active');
+    // Trigger plotly resize so charts fill the container correctly
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
+  }}
+</script>
+
+</body>
+</html>
+"""
+
+# ── 5. SAVE & OPEN ────────────────────────────────────────────────────────────
+output_path = os.path.join(os.getcwd(), "dashboard.html")
+with open(output_path, "w", encoding="utf-8") as f:
+    f.write(HTML)
+
+print(f"\n{'='*55}")
+print(f"✅  Dashboard saved → {output_path}")
+print(f"{'='*55}")
+print("Opening in your browser now...")
+webbrowser.open(f"file:///{output_path}")
